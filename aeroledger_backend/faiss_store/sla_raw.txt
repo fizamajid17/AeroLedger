@@ -1,0 +1,127 @@
+--- PAGE 1 ---
+Calicut International Airport — Ground Handling SLA
+CONFIDENTIAL
+GROUND HANDLING SERVICE LEVEL AGREEMENT
+Calicut International Airport (CCJ)
+This Service Level Agreement (“Agreement”) is entered into between Calicut International Airport Authority
+(“Airport”) and the ground handling service providers named herein (each a “Vendor”), effective from 01 April
+2026 to 31 December 2026 (“Term”).
+1. Parties to the Agreement
+1.1 Airport
+Calicut International Airport Authority, Kozhikode, Kerala, India.
+1.2 Vendors
+- SkyServe Ground Handling Pvt Ltd — Baggage Handling Services
+- AeroClean Facility Services — Aircraft Cabin Cleaning Services
+- FuelTech Aviation Services — Aircraft Fueling Services
+2. Scope of Services
+Each Vendor shall provide the ground handling service(s) designated to it under Section 1.2 for all scheduled
+and chartered flights operating at the Airport during the Term, in accordance with the performance standards set
+out in Sections 3 through 5 below.
+3. Service Level Standards — SkyServe Ground Handling Pvt Ltd
+SkyServe Ground Handling Pvt Ltd shall be bound by the following baggage handling performance standard,
+measured between the specified start and stop events for each flight:
+Max Duration
+Metric Start Event Stop Event Penalty for Breach
+Benchmark
+Last bag delivery
+Aircraft chock-on Last bag on belt Rs. 8,000 per breach 45 minutes
+time
+“Last bag delivery time” is measured electronically via the Airport's baggage handling system (BHS), which
+timestamps the aircraft chock-on event and the last bag on belt event for every arriving flight. The maximum
+duration benchmark for this metric is 45 minutes, as set by the Airport's operational standards referenced in
+Section 6.
+4. Service Level Standards — AeroClean Facility Services
+AeroClean Facility Services shall be bound by the following cabin cleaning performance standard, measured
+between the specified start and stop events for each turnaround:
+Max Duration
+Metric Start Event Stop Event Penalty for Breach
+Benchmark
+Waste and galley Cleaning crew Galley servicing
+Rs. 6,000 per breach 18 minutes
+servicing time boarding complete
+Both events are logged by the cleaning crew supervisor at the aircraft door and cross-verified against the
+Airport's turnaround monitoring system. The maximum duration benchmark for this metric is 18 minutes, as set
+
+### TABLE ON THIS PAGE:
+| Metric | Start Event | Stop Event | Penalty for Breach | Max Duration Benchmark |
+|---|---|---|---|---|
+| Last bag delivery time | Aircraft chock-on | Last bag on belt | Rs. 8,000 per breach | 45 minutes |
+
+### TABLE ON THIS PAGE:
+| Metric | Start Event | Stop Event | Penalty for Breach | Max Duration Benchmark |
+|---|---|---|---|---|
+| Waste and galley servicing time | Cleaning crew boarding | Galley servicing complete | Rs. 6,000 per breach | 18 minutes |
+
+
+--- PAGE 2 ---
+by the Airport's operational standards referenced in Section 6.
+5. Service Level Standards — FuelTech Aviation Services
+FuelTech Aviation Services shall be bound by the following fueling performance standard, measured between
+the specified start and stop events for each flight:
+Max Duration
+Metric Start Event Stop Event Penalty for Breach
+Benchmark
+Fueling completion Bowser connection Fueling complete,
+Rs. 10,000 per breach 40 minutes
+time made signed off
+All event timestamps are logged via the Airport's Ramp Operations Control system and cross-verified against
+the Vendor's own fuel slip records. The maximum duration benchmark for this metric is 40 minutes, as set by the
+Airport's operational standards referenced in Section 6.
+6. Breach Detection and Reporting
+- Each Vendor shall submit daily operational performance data to the Airport's monitoring system by 23:59 on
+the day of operation, recording the actual start time and stop time of each event listed in Sections 3–5.
+- A “breach” occurs whenever the elapsed time between the recorded start event and stop event for a given
+metric exceeds the maximum duration benchmark specified in the applicable Service Level Standards section
+(Sections 3–5) for that metric.
+- Each breach shall be logged with the associated flight number, date, recorded start time, recorded stop time,
+and the specific clause breached.
+- The Airport shall notify the relevant Vendor of any breach within 24 hours of detection.
+- Vendors may raise a formal dispute against any logged breach within 7 calendar days of notification,
+accompanied by supporting evidence.
+7. Penalty Invoicing
+- Penalties for breaches shall accrue per occurrence as specified in the applicable Service Level Standards
+section.
+- The Airport shall issue a consolidated penalty invoice to each Vendor on a monthly basis, itemizing every
+breach, the associated flight number and date, and the penalty amount.
+- Undisputed penalty invoices are payable within 15 days of issuance.
+8. Compliance Scoring
+Each Vendor's compliance score shall be calculated as: (Total Service Events - Breach Events) / Total Service
+Events × 100, evaluated monthly and on a rolling basis over the Term.
+Rating Score Range Basis Action
+Green — Compliant >= 95% Rolling compliance score No action required
+Yellow — At Risk 80% – 94.9% Rolling compliance score Performance improvement notice issued
+Red — Non-Compliant < 80% Rolling compliance score Formal review; renewal at risk
+9. Contract Renewal
+Not later than 90 days prior to expiry of the Term, the Airport shall review each Vendor's trailing 12-month (or,
+where the Term is shorter, the full available period) compliance score and shall determine, in its sole discretion,
+whether to (a) renew the Agreement on existing terms, (b) renew subject to renegotiated terms, or (c) decline to
+renew and seek an alternative service provider.
+
+### TABLE ON THIS PAGE:
+| Metric | Start Event | Stop Event | Penalty for Breach | Max Duration Benchmark |
+|---|---|---|---|---|
+| Fueling completion time | Bowser connection made | Fueling complete, signed off | Rs. 10,000 per breach | 40 minutes |
+
+### TABLE ON THIS PAGE:
+| Rating | Score Range | Basis | Action |
+|---|---|---|---|
+| Green — Compliant | >= 95% | Rolling compliance score | No action required |
+| Yellow — At Risk | 80% – 94.9% | Rolling compliance score | Performance improvement notice issued |
+| Red — Non-Compliant | < 80% | Rolling compliance score | Formal review; renewal at risk |
+
+
+--- PAGE 3 ---
+10. Force Majeure
+No penalty shall accrue for any breach directly caused by force majeure events, including but not limited to
+severe weather, air traffic control strikes, security incidents, or government-mandated operational restrictions,
+provided the affected Vendor notifies the Airport within 24 hours of the event.
+11. Term and Termination
+This Agreement shall remain in effect from 01 April 2026 through 31 December 2026, unless terminated earlier
+by either party for material breach upon 30 days' written notice, or extended by mutual written agreement of the
+parties.
+12. Signatures
+IN WITNESS WHEREOF, the parties have executed this Agreement as of the date first written above.
+_________________________
+For Calicut International Airport Authority
+_________________________
+For Vendor (SkyServe / AeroClean / FuelTech)

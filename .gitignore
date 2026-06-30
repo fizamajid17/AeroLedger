@@ -1,0 +1,13 @@
+# backend
+aeroledger_backend/venv/
+aeroledger_backend/__pycache__/
+aeroledger_backend/.env
+aeroledger_backend/**/__pycache__/
+*.pyc
+
+# frontend
+aeroledger-frontend/node_modules/
+aeroledger-frontend/dist/
+
+# misc
+.DS_Store

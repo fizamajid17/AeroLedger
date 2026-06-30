@@ -1,0 +1,652 @@
+routers/breach.py
+
+from fastapi import APIRouter, UploadFile, File
+from services.breach_detector import detect_breaches
+
+router = APIRouter(prefix="/breach", tags=["Breach Detection"])
+
+@router.post("/detect")
+async def detect(file: UploadFile = File(...)):
+    if not file.filename.endswith(".docx"):
+        return {"status": "error", "message": "Only .docx files accepted"}
+    file_bytes = await file.read()
+    result = detect_breaches(file_bytes)
+    return result
+    ==========================================================================================================================================
+
+routers/ingest.py
+
+from fastapi import APIRouter, UploadFile, File
+from services.rag import ingest_sla
+
+router = APIRouter(prefix="/ingest", tags=["Ingest"])
+
+@router.post("/sla")
+async def upload_sla(file: UploadFile = File(...)):
+    if not file.filename.endswith(".pdf"):
+        return {"status": "error", "message": "Only PDF files accepted"}
+    file_bytes = await file.read()
+    result = ingest_sla(file_bytes)
+    return result
+    
+    ==========================================================================================================================================
+    
+    
+    routers/invoice.py
+
+from fastapi import APIRouter
+from fastapi.responses import FileResponse
+from utils.pdf_generator import generate_invoice_pdf
+import os
+
+router = APIRouter(prefix="/invoice", tags=["Invoice"])
+
+@router.post("/generate")
+async def generate_invoice(breach_result: dict):
+    filepath = generate_invoice_pdf(breach_result)
+    return FileResponse(
+        path=filepath,
+        media_type="application/pdf",
+        filename=os.path.basename(filepath)
+    )
+===============================================================================================================================================
+
+services/breach_detector.py
+
+import os
+import io
+import pandas as pd
+from docx import Document
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
+from services.rag import query_sla, sla_is_ingested
+
+load_dotenv()
+
+class DocxHeader(BaseModel):
+    vendor_name: str = Field(description="The company providing the service. Do NOT output the airport name.")
+    metric_or_service: str = Field(description="The specific service or metric being measured.")
+
+class VendorClause(BaseModel):
+    reasoning: str = Field(description="Step-by-step reasoning. 1. Read the retrieved pages. 2. Find the section for the TARGET VENDOR. 3. Identify their specific table on that page. 4. Extract threshold and penalty. DO NOT look at tables belonging to other vendors.")
+    vendor_name: str = Field(description="Full legal vendor name exactly as written.")
+    metric: str = Field(description="The exact metric name from the TARGET VENDOR'S table. Do not copy metrics from other vendors.")
+    threshold_value: float = Field(description="The limit number. Return 0 if the target vendor is missing.")
+    threshold_unit: str = Field(description="Time unit: 'seconds', 'minutes', 'hours'.")
+    penalty_per_breach: int = Field(description="Penalty as plain integer. Return 0 if missing.")
+    currency: str = Field(description="Always INR")
+
+def to_minutes(value: float, unit: str) -> float:
+    if value == 0: return 0
+    unit = (unit or "").strip().lower()
+    if unit.startswith("second"): return value / 60
+    if unit.startswith("hour"): return value * 60
+    return value
+
+def extract_tables_from_docx(file_bytes: bytes) -> list:
+    dfs = []
+    for table in Document(io.BytesIO(file_bytes)).tables:
+        rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+        if len(rows) > 1: dfs.append(pd.DataFrame(rows[1:], columns=rows[0]))
+    return dfs
+
+def extract_text_from_docx(file_bytes: bytes) -> str:
+    return "\n".join([p.text.strip() for p in Document(io.BytesIO(file_bytes)).paragraphs if p.text.strip()])
+
+def get_sla_thresholds(doc_meta_text: str) -> dict:
+    if not sla_is_ingested(): 
+        return {"extraction_failed": True, "error": "No SLA ingested. Please upload an SLA PDF via /ingest/sla first."}
+
+    llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0)
+    
+    hint_prompt = ChatPromptTemplate.from_template(
+        "Extract the Vendor Name (the company providing the service, NOT the airport) and the Service from this header:\n\n{header}"
+    )
+    try:
+        hints = (hint_prompt | llm.with_structured_output(DocxHeader)).invoke({"header": doc_meta_text[:800]})
+        vendor_hint = hints.vendor_name
+        metric_hint = hints.metric_or_service
+    except Exception as e:
+        return {"extraction_failed": True, "error": f"Failed to parse DOCX header: {e}"}
+
+    rag_query = f"{vendor_hint} {metric_hint} maximum permissible duration threshold penalty"
+    sla_context = query_sla(rag_query, k=4) # Fetch top 4 pages
+
+    clause_prompt = ChatPromptTemplate.from_template("""
+    You are an elite legal contract AI parsing FAISS vector data.
+    
+    PAGES RETRIEVED FROM FAISS: 
+    {sla_context}
+    
+    TARGET VENDOR: {vendor_hint} 
+    TARGET METRIC/SERVICE: {metric_hint}
+    
+    CRITICAL RULES:
+    1. Populate the 'reasoning' field first. You will see entire pages. You MUST locate the text for {vendor_hint} and only extract data from the table immediately associated with them.
+    2. Ignore tables belonging to other vendors (e.g. Vega Ramp Solutions, Petrosafe) even if they are on the same page.
+    3. If {vendor_hint} is not found on these pages, return 0 for threshold_value and penalty_per_breach.
+    """)
+    
+    try:
+        res: VendorClause = (clause_prompt | llm.with_structured_output(VendorClause)).invoke({
+            "sla_context": sla_context, "vendor_hint": vendor_hint, "metric_hint": metric_hint
+        })
+        
+        if res.threshold_value == 0 or res.penalty_per_breach == 0:
+            return {
+                "extraction_failed": True, 
+                "error": f"SLA rules for '{vendor_hint}' not found in the FAISS database. Please upload the correct SLA PDF for this vendor."
+            }
+
+        return {
+            "vendor": res.vendor_name, "metric": res.metric, "currency": res.currency,
+            "threshold_minutes": to_minutes(res.threshold_value, res.threshold_unit),
+            "penalty_per_breach": res.penalty_per_breach, "extraction_failed": False
+        }
+    except Exception as e:
+        return {"extraction_failed": True, "error": str(e)}
+
+def detect_breaches_from_df(df: pd.DataFrame, limit: float, penalty: int, vendor: str, metric: str) -> list:
+    breaches = []
+    dur_col = next((c for c in df.columns if any(s in c.lower() for s in ["dur", "elapsed"])), None)
+    flt_col = next((c for c in df.columns if any(s in c.lower() for s in ["flight", "flt"])), None)
+    dat_col = next((c for c in df.columns if "date" in c.lower() or "day" in c.lower()), None)
+
+    if not dur_col: return breaches
+    for _, row in df.iterrows():
+        try: duration = float(str(row[dur_col]).replace("min", "").strip())
+        except: continue
+        
+        # STRICT LOGIC: Breach ONLY occurs if duration strictly exceeds the limit
+        if duration > limit:
+            breaches.append({
+                "vendor": vendor, "metric": metric, "penalty": penalty,
+                "flight_number": str(row[flt_col]).strip() if flt_col else "N/A",
+                "date": str(row[dat_col]).strip() if dat_col else "N/A",
+                "actual_minutes": round(duration, 1), "threshold_minutes": limit,
+                "overage_minutes": round(duration - limit, 1),
+            })
+    return breaches
+
+def summarize_breaches_with_llm(breaches: list, sla_info: dict) -> str:
+    if not breaches: return "No breaches detected."
+    
+    curr = sla_info.get("currency", "INR")
+    total_formatted = f"{curr} {len(breaches) * (sla_info.get('penalty_per_breach') or 0):,}"
+    worst_3 = sorted(breaches, key=lambda b: b["overage_minutes"], reverse=True)[:3]
+    
+    # THE FIX: Explicit, unambiguous text generation per flight
+    worst_txt = "\n".join([f"- Flight {b['flight_number']}: Total Duration was {b['actual_minutes']} mins (which is {b['overage_minutes']} mins over the limit). Explicit Penalty: {curr} {b['penalty']:,}" for b in worst_3])
+    
+    llm = ChatGroq(model_name="llama-3.1-8b-instant", temperature=0)
+    prompt = ChatPromptTemplate.from_template("""
+    Write a summary of the SLA breaches using EXACTLY the numbers provided. DO NO MATH.
+    
+    DATA PROVIDED:
+    Total Breaches: {total_breaches} | Total Penalty: {total_penalty_formatted}
+    Worst Offenders: 
+    {worst_offenders}
+    
+    CRITICAL INSTRUCTIONS:
+    1. Sentence 1: State the total breaches and total penalty.
+    2. Remaining Sentences: You must write exactly one distinct sentence for EACH of the worst flights listed above, using this exact template:
+    "Flight [Flight Number] had a total duration of [Duration], exceeding the limit by [Overage], with an explicit penalty of [Penalty]."
+    
+    Do not add any extra commentary. Do NOT group flights together.
+    """)
+    return (prompt | llm).invoke({
+        "total_breaches": len(breaches), "total_penalty_formatted": total_formatted, "worst_offenders": worst_txt
+    }).content.strip()
+
+def detect_breaches(file_bytes: bytes) -> dict:
+    dfs = extract_tables_from_docx(file_bytes)
+    sla_info = get_sla_thresholds(extract_text_from_docx(file_bytes))
+    
+    if sla_info.get("extraction_failed"): 
+        return {"status": "error", "message": sla_info.get("error")}
+
+    limit, penalty = float(sla_info.get("threshold_minutes", 45)), int(sla_info.get("penalty_per_breach") or 0)
+    vendor, metric = sla_info.get("vendor"), sla_info.get("metric")
+
+    all_breaches = []
+    for df in dfs: all_breaches.extend(detect_breaches_from_df(df, limit, penalty, vendor, metric))
+    all_breaches.sort(key=lambda b: b["overage_minutes"], reverse=True)
+
+    return {
+        "status": "success", "vendor": vendor, "metric": metric, "currency": sla_info.get("currency", "INR"),
+        "threshold_minutes": limit, "penalty_per_breach": penalty, "total_breaches": len(all_breaches),
+        "total_penalty": len(all_breaches) * penalty, "breaches": all_breaches,
+        "summary": summarize_breaches_with_llm(all_breaches, sla_info)
+    }
+ 	
+===============================================================================================================================================
+
+services/rag.py
+
+
+import os
+import io
+import shutil
+import pdfplumber
+from dotenv import load_dotenv
+from typing import List
+from pydantic import BaseModel, Field
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.documents import Document
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+
+load_dotenv()
+
+FAISS_INDEX_PATH = "faiss_store/sla_index"
+SLA_TEXT_PATH    = "faiss_store/sla_raw.txt"
+EMBEDDING_MODEL  = "sentence-transformers/all-MiniLM-L6-v2"
+
+def get_embeddings():
+    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+
+def sla_is_ingested() -> bool:
+    return os.path.exists(FAISS_INDEX_PATH)
+
+class VendorList(BaseModel):
+    vendors: List[str] = Field(description="Every distinct vendor name exactly as written.")
+
+def discover_vendors(raw_text: str) -> List[str]:
+    llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0)
+    structured_llm = llm.with_structured_output(VendorList)
+    prompt = ChatPromptTemplate.from_template(
+        "List every distinct vendor or service-provider name in this contract. Do not include the Airport itself.\n\n{raw_text}"
+    )
+    try:
+        result = (prompt | structured_llm).invoke({"raw_text": raw_text[:4000]})
+        return [v.strip() for v in result.vendors if v.strip()]
+    except:
+        return []
+
+# ── The Fix: Page-Level Chunking ──────────────────────────────────────────────
+def extract_pages_with_tables(file_bytes: bytes) -> List[Document]:
+    docs = []
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for i, page in enumerate(pdf.pages):
+            page_text = page.extract_text() or ""
+            
+            tables = page.extract_tables()
+            md_tables = []
+            for table in tables:
+                if not table or len(table) < 2: continue
+                md = "\n### TABLE ON THIS PAGE:\n"
+                headers = [str(c).replace('\n', ' ').strip() if c else "" for c in table[0]]
+                md += "| " + " | ".join(headers) + " |\n"
+                md += "|" + "|".join(["---"] * len(headers)) + "|\n"
+                for row in table[1:]:
+                    row_data = [str(c).replace('\n', ' ').strip() if c else "" for c in row]
+                    md += "| " + " | ".join(row_data) + " |\n"
+                md_tables.append(md)
+            
+            # Store the ENTIRE PAGE as one chunk so tables are never orphaned
+            full_content = f"--- PAGE {i+1} ---\n{page_text}\n" + "".join(md_tables)
+            docs.append(Document(page_content=full_content, metadata={"page": i+1}))
+    return docs
+
+def ingest_sla(file_bytes: bytes) -> dict:
+    # Completely wipe the old multi-folder faiss_store
+    if os.path.exists("faiss_store"):
+        shutil.rmtree("faiss_store")
+    os.makedirs("faiss_store", exist_ok=True)
+    
+    docs = extract_pages_with_tables(file_bytes)
+    
+    raw_text = "\n\n".join([d.page_content for d in docs])
+    with open(SLA_TEXT_PATH, "w", encoding="utf-8") as f:
+        f.write(raw_text)
+        
+    embeddings = get_embeddings()
+    vectorstore = FAISS.from_documents(docs, embeddings)
+    vectorstore.save_local(FAISS_INDEX_PATH)
+    
+    vendors = discover_vendors(raw_text)
+    
+    return {"status": "success", "vendors_found": vendors, "message": "Pure RAG active (Page-level chunking)."}
+
+def query_sla(query: str, k: int = 4) -> str:
+    if not os.path.exists(FAISS_INDEX_PATH): return ""
+    embeddings = get_embeddings()
+    vectorstore = FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+    docs = vectorstore.similarity_search(query, k=k)
+    return "\n\n====================\n\n".join([doc.page_content for doc in docs])
+
+ =================================================================================================================================
+utils/pdf_generator.py
+
+"""
+utils/pdf_generator.py
+
+CHANGE IN THIS VERSION (airport name fix):
+  Airport name is no longer hardcoded as "Calicut International Airport
+  Authority". It's now read from breach_result["airport_name"], which
+  flows in from: SLA PDF (extracted by LLM in rag.py) -> clause cache ->
+  breach_detector.py -> this dict. Whatever airport is in the SLA you
+  ingest is the airport that shows up on the invoice PDF.
+
+  Falls back to "Unknown Airport" only if airport_name is genuinely
+  missing (e.g. old breach_result from before this fix, or SLA that
+  truly had no airport name in it).
+"""
+
+import os
+from datetime import datetime, timedelta
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
+
+
+def generate_invoice_pdf(breach_result: dict) -> str:
+    airport_name  = breach_result.get("airport_name") or "Unknown Airport"
+    vendor        = breach_result.get("vendor", "Unknown Vendor")
+    metric        = breach_result.get("metric", "Unknown Metric")
+    threshold     = breach_result.get("threshold_minutes", 0)
+    penalty_each  = breach_result.get("penalty_per_breach", 0)
+    currency      = breach_result.get("currency", "INR")
+    breaches      = breach_result.get("breaches", [])
+    total_penalty = breach_result.get("total_penalty", 0)
+
+    # Build a clean header line. If the airport name already ends with
+    # "Authority" we don't double it up; otherwise we append
+    # "Authority" for a consistent invoice header look.
+    header_text = airport_name
+    if not header_text.lower().endswith("authority"):
+        header_text = f"{airport_name} Authority"
+
+    # Invoice metadata
+    invoice_date  = datetime.now()
+    invoice_no    = f"AERO-{invoice_date.strftime('%Y%m%d%H%M%S')}"
+    due_date      = invoice_date + timedelta(days=15)
+
+    os.makedirs("invoices", exist_ok=True)
+    filename      = f"invoices/invoice_{invoice_no}.pdf"
+    doc           = SimpleDocTemplate(filename, pagesize=A4,
+                        rightMargin=20*mm, leftMargin=20*mm,
+                        topMargin=20*mm, bottomMargin=20*mm)
+    styles        = getSampleStyleSheet()
+    story         = []
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    header_style = ParagraphStyle("header", fontSize=16, fontName="Helvetica-Bold",
+                                   alignment=TA_CENTER, spaceAfter=2*mm)
+    sub_style    = ParagraphStyle("sub", fontSize=10, fontName="Helvetica",
+                                   alignment=TA_CENTER, spaceAfter=6*mm, textColor=colors.grey)
+    story.append(Paragraph(header_text, header_style))
+    story.append(Paragraph("Ground Handling SLA Compliance", sub_style))
+
+    # Divider
+    story.append(Table([[""]], colWidths=[170*mm],
+        style=TableStyle([("LINEBELOW", (0,0), (-1,-1), 1, colors.HexColor("#003366"))])))
+    story.append(Spacer(1, 5*mm))
+
+    # ── Invoice meta ──────────────────────────────────────────────────────────
+    title_style = ParagraphStyle("title", fontSize=13, fontName="Helvetica-Bold",
+                                  spaceAfter=4*mm, textColor=colors.HexColor("#003366"))
+    story.append(Paragraph("PENALTY INVOICE", title_style))
+
+    meta_data = [
+        ["Invoice No.",  invoice_no,       "Invoice Date", invoice_date.strftime("%d %b %Y")],
+        ["Vendor",       vendor,           "Payment Due",  due_date.strftime("%d %b %Y")],
+        ["Service",      metric,           "Currency",     currency],
+        ["SLA Threshold", f"{threshold} minutes", "Penalty/Breach", f"{currency} {penalty_each:,}"],
+    ]
+    meta_table = Table(meta_data, colWidths=[38*mm, 55*mm, 38*mm, 39*mm])
+    meta_table.setStyle(TableStyle([
+        ("FONTNAME",    (0,0), (-1,-1), "Helvetica"),
+        ("FONTNAME",    (0,0), (0,-1), "Helvetica-Bold"),
+        ("FONTNAME",    (2,0), (2,-1), "Helvetica-Bold"),
+        ("FONTSIZE",    (0,0), (-1,-1), 9),
+        ("TEXTCOLOR",   (0,0), (0,-1), colors.HexColor("#003366")),
+        ("TEXTCOLOR",   (2,0), (2,-1), colors.HexColor("#003366")),
+        ("ROWBACKGROUNDS", (0,0), (-1,-1), [colors.HexColor("#f0f4f8"), colors.white]),
+        ("GRID",        (0,0), (-1,-1), 0.3, colors.HexColor("#cccccc")),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING",  (0,0), (-1,-1), 4),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 6*mm))
+
+    # ── Breach table ──────────────────────────────────────────────────────────
+    story.append(Paragraph("Breach Detail", title_style))
+
+    table_header = ["#", "Date", "Flight No.", "Actual (min)", "Threshold (min)", "Penalty (Rs.)"]
+    table_data   = [table_header]
+
+    for i, b in enumerate(breaches, 1):
+        table_data.append([
+            str(i),
+            b.get("date", ""),
+            b.get("flight_number", ""),
+            str(b.get("actual_minutes", "")),
+            str(b.get("threshold_minutes", "")),
+            f"{b.get('penalty', 0):,}",
+        ])
+
+    # Total row
+    table_data.append(["", "", "", "", "TOTAL", f"{total_penalty:,}"])
+
+    col_widths = [10*mm, 28*mm, 30*mm, 32*mm, 35*mm, 35*mm]
+    breach_table = Table(table_data, colWidths=col_widths, repeatRows=1)
+    breach_table.setStyle(TableStyle([
+        # Header
+        ("BACKGROUND",    (0,0), (-1,0), colors.HexColor("#003366")),
+        ("TEXTCOLOR",     (0,0), (-1,0), colors.white),
+        ("FONTNAME",      (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE",      (0,0), (-1,0), 9),
+        ("ALIGN",         (0,0), (-1,0), "CENTER"),
+        # Body
+        ("FONTNAME",      (0,1), (-1,-2), "Helvetica"),
+        ("FONTSIZE",      (0,1), (-1,-2), 8.5),
+        ("ROWBACKGROUNDS",(0,1), (-1,-2), [colors.white, colors.HexColor("#f7f9fc")]),
+        ("ALIGN",         (0,1), (-1,-1), "CENTER"),
+        # Total row
+        ("BACKGROUND",    (0,-1), (-1,-1), colors.HexColor("#e8f0fe")),
+        ("FONTNAME",      (0,-1), (-1,-1), "Helvetica-Bold"),
+        ("FONTSIZE",      (0,-1), (-1,-1), 9),
+        ("TEXTCOLOR",     (4,-1), (5,-1), colors.HexColor("#cc0000")),
+        # Grid
+        ("GRID",          (0,0), (-1,-1), 0.3, colors.HexColor("#cccccc")),
+        ("LINEBELOW",     (0,0), (-1,0), 1, colors.HexColor("#003366")),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING",    (0,0), (-1,-1), 4),
+    ]))
+    story.append(breach_table)
+    story.append(Spacer(1, 6*mm))
+
+    # ── Summary box ───────────────────────────────────────────────────────────
+    summary_data = [
+        [f"Total Breaches: {len(breaches)}",
+         f"Total Penalty Due: {currency} {total_penalty:,}",
+         f"Payment Due By: {due_date.strftime('%d %b %Y')}"]
+    ]
+    summary_table = Table(summary_data, colWidths=[55*mm, 65*mm, 50*mm])
+    summary_table.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (-1,-1), colors.HexColor("#003366")),
+        ("TEXTCOLOR",     (0,0), (-1,-1), colors.white),
+        ("FONTNAME",      (0,0), (-1,-1), "Helvetica-Bold"),
+        ("FONTSIZE",      (0,0), (-1,-1), 9),
+        ("ALIGN",         (0,0), (-1,-1), "CENTER"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING",    (0,0), (-1,-1), 6),
+    ]))
+    story.append(summary_table)
+    story.append(Spacer(1, 6*mm))
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    footer_style = ParagraphStyle("footer", fontSize=8, textColor=colors.grey,
+                                   alignment=TA_CENTER, spaceAfter=2*mm)
+    story.append(Paragraph(
+        "Undisputed penalty invoices payable within 15 days of issuance. "
+        "Vendors may raise dispute within 7 calendar days of notification. "
+        f"Ref: Section 7, {airport_name} Ground Handling SLA.", footer_style))
+    story.append(Paragraph(
+        f"Generated by AeroLedger | {invoice_date.strftime('%d %b %Y %H:%M')}",
+        ParagraphStyle("gen", fontSize=7, textColor=colors.lightgrey, alignment=TA_CENTER)))
+
+    doc.build(story)
+    return filename
+==============================================================================================================================================
+
+main.py
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from routers import ingest, breach, invoice
+
+app = FastAPI(title="AeroLedger API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(ingest.router)
+app.include_router(breach.router)
+app.include_router(invoice.router)
+
+@app.get("/")
+def root():
+    return {"message": "AeroLedger API running"}
+
+==================================================================================================================================================
+
+requirements.txt
+
+aiohappyeyeballs==2.6.2
+aiohttp==3.14.1
+aiosignal==1.4.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.14.0
+async-timeout==4.0.3
+attrs==26.1.0
+certifi==2026.5.20
+cffi==2.0.0
+charset-normalizer==3.4.7
+click==8.4.1
+cryptography==49.0.0
+cuda-bindings==13.3.1
+cuda-pathfinder==1.5.5
+cuda-toolkit==13.0.2
+distro==1.9.0
+exceptiongroup==1.3.1
+faiss-cpu==1.14.3
+fastapi==0.137.1
+filelock==3.29.4
+frozenlist==1.8.0
+fsspec==2026.6.0
+greenlet==3.5.1
+groq==0.37.1
+h11==0.16.0
+hf-xet==1.5.1
+httpcore==1.0.9
+httpx==0.28.1
+httpx-sse==0.4.3
+huggingface_hub==1.19.0
+idna==3.18
+Jinja2==3.1.6
+joblib==1.5.3
+jsonpatch==1.33
+jsonpointer==3.1.1
+langchain==1.3.9
+langchain-classic==1.0.8
+langchain-community==0.4.2
+langchain-core==1.4.7
+langchain-groq==1.1.3
+langchain-huggingface==1.2.2
+langchain-protocol==0.0.17
+langchain-text-splitters==1.1.2
+langgraph==1.2.5
+langgraph-checkpoint==4.1.1
+langgraph-prebuilt==1.1.0
+langgraph-sdk==0.4.2
+langsmith==0.8.16
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+mpmath==1.3.0
+multidict==6.7.1
+networkx==3.4.2
+numpy==2.2.6
+nvidia-cublas==13.1.1.3
+nvidia-cuda-cupti==13.0.85
+nvidia-cuda-nvrtc==13.0.88
+nvidia-cuda-runtime==13.0.96
+nvidia-cudnn-cu13==9.20.0.48
+nvidia-cufft==12.0.0.61
+nvidia-cufile==1.15.1.6
+nvidia-curand==10.4.0.35
+nvidia-cusolver==12.0.4.66
+nvidia-cusparse==12.6.3.3
+nvidia-cusparselt-cu13==0.8.1
+nvidia-nccl-cu13==2.29.7
+nvidia-nvjitlink==13.0.88
+nvidia-nvshmem-cu13==3.4.5
+nvidia-nvtx==13.0.85
+orjson==3.11.9
+ormsgpack==1.12.2
+packaging==26.2
+pdfminer.six==20260107
+pdfplumber==0.11.10
+pillow==12.2.0
+propcache==0.5.2
+psycopg2-binary==2.9.12
+pycparser==3.0
+pydantic==2.13.4
+pydantic-settings==2.14.1
+pydantic_core==2.46.4
+Pygments==2.20.0
+pypdfium2==5.10.1
+python-dotenv==1.2.2
+python-docx==1.2.0
+python-multipart==0.0.32
+PyYAML==6.0.3
+regex==2026.5.9
+reportlab==4.5.1
+requests==2.34.2
+requests-toolbelt==1.0.0
+rich==15.0.0
+safetensors==0.8.0
+scikit-learn==1.7.2
+scipy==1.15.3
+sentence-transformers==5.6.0
+shellingham==1.5.4
+sniffio==1.3.1
+SQLAlchemy==2.0.51
+starlette==1.3.1
+sympy==1.14.0
+tenacity==9.1.4
+threadpoolctl==3.6.0
+tokenizers==0.22.2
+torch==2.12.0
+tqdm==4.68.3
+transformers==5.12.1
+triton==3.7.0
+typer==0.25.1
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+urllib3==2.7.0
+uuid_utils==0.16.1
+uvicorn==0.49.0
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==15.0.1
+xxhash==3.7.0
+yarl==1.24.2
+zstandard==0.25.0
+
+================================================================================================================================================
+
